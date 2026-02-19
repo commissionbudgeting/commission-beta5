@@ -1,0 +1,506 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Commission Forecast Beta v5</title>
+
+<style>
+:root{
+  --bg:#0f172a;
+  --card:#1e293b;
+  --accent:#7c3aed;
+  --accent2:#22d3ee;
+  --good:#22c55e;
+  --warn:#f59e0b;
+  --bad:#ef4444;
+  --text:#f8fafc;
+}
+
+body{
+  margin:0;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  background: linear-gradient(135deg, #0f172a, #1e293b);
+  color: var(--text);
+}
+
+header{
+  padding:20px;
+  background: linear-gradient(135deg,var(--accent),var(--accent2));
+  text-align:center;
+  font-weight:700;
+  font-size:20px;
+}
+
+.container{
+  max-width:1000px;
+  margin:auto;
+  padding:20px;
+}
+
+.card{
+  background: var(--card);
+  padding:20px;
+  border-radius:16px;
+  margin-bottom:20px;
+  box-shadow:0 10px 30px rgba(0,0,0,.3);
+}
+
+input, select{
+  width:100%;
+  padding:10px;
+  margin:6px 0 12px 0;
+  border-radius:8px;
+  border:none;
+}
+
+button{
+  padding:10px 14px;
+  border:none;
+  border-radius:8px;
+  background:var(--accent);
+  color:white;
+  font-weight:600;
+  cursor:pointer;
+  margin-top:5px;
+}
+
+button.secondary{
+  background:#334155;
+}
+
+.progress{
+  height:16px;
+  background:#334155;
+  border-radius:20px;
+  overflow:hidden;
+  margin-top:10px;
+}
+
+.progress-fill{
+  height:100%;
+  background:linear-gradient(90deg,var(--accent2),var(--accent));
+  width:0%;
+  transition:.4s;
+}
+
+.kpi{
+  display:flex;
+  justify-content:space-between;
+  flex-wrap:wrap;
+  gap:10px;
+}
+
+.kpi div{
+  background:#334155;
+  padding:12px;
+  border-radius:12px;
+  flex:1;
+  min-width:150px;
+}
+
+table{
+  width:100%;
+  border-collapse:collapse;
+}
+
+td, th{
+  padding:8px;
+  border-bottom:1px solid #334155;
+}
+
+.small{
+  font-size:12px;
+  opacity:.7;
+}
+</style>
+</head>
+<body>
+
+<header>
+Commission Income Planner — Beta v5
+</header>
+
+<div class="container">
+
+<div class="card">
+<h3>Settings</h3>
+<label>Selling Days Left</label>
+<input type="number" id="sellingDays">
+
+<label>Monthly Savings Goal</label>
+<input type="number" id="savings">
+
+<label>Safe Number Override (optional)</label>
+<input type="number" id="override">
+
+<button onclick="saveSettings()">Save Settings</button>
+</div>
+
+<div class="card">
+<h3>Add Bill</h3>
+<input placeholder="Bill name" id="billName">
+<input type="number" placeholder="Amount" id="billAmount">
+<button onclick="addBill()">Add Bill</button>
+
+<div id="billList"></div>
+</div>
+
+<div class="card">
+<h3>Add Deal</h3>
+<input type="number" placeholder="Deal payout" id="dealAmount">
+<button onclick="addDeal()">Add Deal</button>
+
+<div id="dealList"></div>
+</div>
+
+<div class="card">
+<h3>Progress to Safe Number</h3>
+<div class="progress">
+<div class="progress-fill" id="progressFill"></div>
+</div>
+<div id="progressText"></div>
+</div>
+
+<div class="card">
+<h3>Forecast (Next 6 Months)</h3>
+<table>
+<thead>
+<tr>
+<th>Month</th>
+<th>Conservative</th>
+<th>Base</th>
+<th>Optimistic</th>
+</tr>
+</thead>
+<tbody id="forecastTable"></tbody>
+</table>
+</div>
+
+</div>
+<script>
+/**
+ * Commission Forecast Beta v5 — Logic Engine
+ * - Local storage persistence
+ * - Bills + Deals CRUD
+ * - Safe number (Bills + Savings OR Override)
+ * - Projection (uses sellingDaysLeft + avg deal payout)
+ * - Forecast next 6 months (auto-updates)
+ *
+ * Notes:
+ * - This is a pure front-end single file (perfect for GitHub Pages).
+ * - Data stays local in the browser (localStorage), even when hosted.
+ */
+
+const STORAGE_KEY = "commission_beta_v5_prod";
+
+let state = {
+  settings: {
+    sellingDays: 0,
+    savings: 0,
+    override: 0
+  },
+  bills: [],   // { id, name, amount }
+  deals: []    // { id, amount }
+};
+
+// ---------- Utilities ----------
+function uid() {
+  return Math.random().toString(16).slice(2) + Date.now().toString(16);
+}
+function money(n) {
+  if (!isFinite(n)) return "$0";
+  return "$" + Math.round(n).toLocaleString();
+}
+function num(v) {
+  const n = Number(String(v ?? "").replace(/[^0-9.\-]/g, ""));
+  return Number.isFinite(n) ? n : 0;
+}
+function monthName(m) {
+  return ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"][m];
+}
+function load() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return;
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") return;
+    state = {
+      settings: Object.assign(state.settings, parsed.settings || {}),
+      bills: Array.isArray(parsed.bills) ? parsed.bills : [],
+      deals: Array.isArray(parsed.deals) ? parsed.deals : []
+    };
+  } catch(e) {}
+}
+function save() {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+  } catch(e) {}
+}
+
+// ---------- Core Math ----------
+function billsTotal() {
+  return state.bills.reduce((sum, b) => sum + (num(b.amount) || 0), 0);
+}
+function dealsIncome() {
+  return state.deals.reduce((sum, d) => sum + (num(d.amount) || 0), 0);
+}
+function dealCount() {
+  return state.deals.length;
+}
+function avgDeal() {
+  const c = dealCount();
+  const inc = dealsIncome();
+  if (c <= 0) return 0;
+  return inc / c;
+}
+function safeNumber() {
+  const override = num(state.settings.override);
+  if (override > 0) return override;
+  return billsTotal() + num(state.settings.savings);
+}
+
+/**
+ * Projection logic (simple + stable for beta):
+ * - If sellingDaysLeft is set AND there is at least 1 deal,
+ *   project remaining income assuming 1 deal per selling day at avg payout.
+ * - projected = incomeLogged + (avgDeal * sellingDaysLeft)
+ *
+ * This is intentionally simple for beta:
+ * - It rewards daily logging (avgDeal improves)
+ * - It updates instantly
+ * - It doesn’t require “days elapsed” input
+ */
+function projectedIncome() {
+  const income = dealsIncome();
+  const daysLeft = num(state.settings.sellingDays);
+  const avg = avgDeal();
+
+  if (daysLeft > 0 && avg > 0) {
+    return income + (avg * daysLeft);
+  }
+  // fallback: if no sellingDaysLeft or no deals, just show logged income
+  return income;
+}
+
+/**
+ * Forecast base:
+ * - Use projected income (if sellingDaysLeft entered and deals exist)
+ * - Otherwise use logged income
+ */
+function forecastBase() {
+  const proj = projectedIncome();
+  return proj > 0 ? proj : 0;
+}
+
+// ---------- Rendering ----------
+function renderBills() {
+  const el = document.getElementById("billList");
+  const total = billsTotal();
+
+  if (!state.bills.length) {
+    el.innerHTML = `<p class="small">No bills added yet.</p>`;
+    return;
+  }
+
+  const rows = state.bills
+    .slice()
+    .sort((a,b) => (a.name||"").localeCompare(b.name||""))
+    .map(b => `
+      <div style="display:flex;justify-content:space-between;gap:10px;align-items:center;margin:8px 0;">
+        <div>
+          <div><b>${escapeHtml(b.name || "")}</b></div>
+          <div class="small">${money(num(b.amount))}</div>
+        </div>
+        <button class="secondary" onclick="deleteBill('${b.id}')">Delete</button>
+      </div>
+    `)
+    .join("");
+
+  el.innerHTML = `
+    <div class="small" style="margin-bottom:10px;">
+      Bills total: <b>${money(total)}</b>
+    </div>
+    ${rows}
+  `;
+}
+
+function renderDeals() {
+  const el = document.getElementById("dealList");
+
+  if (!state.deals.length) {
+    el.innerHTML = `<p class="small">No deals added yet.</p>`;
+    return;
+  }
+
+  const inc = dealsIncome();
+  const avg = avgDeal();
+  const rows = state.deals
+    .slice()
+    .map((d, idx) => `
+      <div style="display:flex;justify-content:space-between;gap:10px;align-items:center;margin:8px 0;">
+        <div>
+          <div><b>Deal #${idx+1}</b></div>
+          <div class="small">${money(num(d.amount))}</div>
+        </div>
+        <button class="secondary" onclick="deleteDeal('${d.id}')">Delete</button>
+      </div>
+    `)
+    .join("");
+
+  el.innerHTML = `
+    <div class="small" style="margin-bottom:10px;">
+      Logged income: <b>${money(inc)}</b> • Avg per deal: <b>${money(avg)}</b>
+    </div>
+    ${rows}
+  `;
+}
+
+function renderProgress() {
+  const fill = document.getElementById("progressFill");
+  const txt = document.getElementById("progressText");
+
+  const safe = safeNumber();
+  const logged = dealsIncome();
+  const proj = projectedIncome();
+  const usingProjection = (num(state.settings.sellingDays) > 0 && avgDeal() > 0);
+
+  if (!(safe > 0)) {
+    fill.style.width = "0%";
+    txt.innerHTML = `<p class="small">Add bills + savings goal (or an override) to compute your safe number.</p>`;
+    return;
+  }
+
+  const base = usingProjection ? proj : logged;
+  const pct = Math.max(0, Math.min(100, (base / safe) * 100));
+  fill.style.width = pct.toFixed(0) + "%";
+
+  const gap = Math.max(0, safe - base);
+
+  txt.innerHTML = `
+    <div class="small" style="margin-top:10px;">
+      Safe number: <b>${money(safe)}</b><br/>
+      ${usingProjection ? "Projected income" : "Logged income"}: <b>${money(base)}</b><br/>
+      Gap: <b>${money(gap)}</b><br/>
+      ${usingProjection ? `<span class="small">Projection uses avg deal payout × selling days left.</span>` : ""}
+    </div>
+  `;
+}
+
+function renderForecast() {
+  const tbody = document.getElementById("forecastTable");
+  const base = forecastBase();
+
+  // If no data yet, show placeholder
+  if (!(base > 0)) {
+    tbody.innerHTML = `<tr><td colspan="4" class="small">Add some deals to generate a forecast.</td></tr>`;
+    return;
+  }
+
+  // Scenario spread
+  const spread = 0.15; // ±15% (can be made configurable later)
+  const consFactor = 1 - spread;
+  const optFactor  = 1 + spread;
+
+  // Next 6 months
+  const now = new Date();
+  let rows = "";
+  for (let i = 1; i <= 6; i++) {
+    const d = new Date(now.getFullYear(), now.getMonth() + i, 1);
+    const label = `${monthName(d.getMonth())} ${d.getFullYear()}`;
+    const cons = base * consFactor;
+    const opt  = base * optFactor;
+
+    rows += `
+      <tr>
+        <td>${label}</td>
+        <td>${money(cons)}</td>
+        <td><b>${money(base)}</b></td>
+        <td>${money(opt)}</td>
+      </tr>
+    `;
+  }
+  tbody.innerHTML = rows;
+}
+
+function renderAll() {
+  renderBills();
+  renderDeals();
+  renderProgress();
+  renderForecast();
+  save();
+}
+
+// ---------- Actions ----------
+function saveSettings() {
+  state.settings.sellingDays = num(document.getElementById("sellingDays").value);
+  state.settings.savings = num(document.getElementById("savings").value);
+  state.settings.override = num(document.getElementById("override").value);
+  renderAll();
+}
+
+function addBill() {
+  const name = (document.getElementById("billName").value || "").trim();
+  const amount = num(document.getElementById("billAmount").value);
+
+  if (!name) return alert("Enter a bill name.");
+  if (!(amount > 0)) return alert("Enter a bill amount > 0.");
+
+  state.bills.push({ id: uid(), name, amount });
+  document.getElementById("billName").value = "";
+  document.getElementById("billAmount").value = "";
+  renderAll();
+}
+
+function deleteBill(id) {
+  state.bills = state.bills.filter(b => b.id !== id);
+  renderAll();
+}
+
+function addDeal() {
+  const amount = num(document.getElementById("dealAmount").value);
+  if (!(amount > 0)) return alert("Enter a deal payout > 0.");
+
+  state.deals.push({ id: uid(), amount });
+  document.getElementById("dealAmount").value = "";
+  renderAll();
+}
+
+function deleteDeal(id) {
+  state.deals = state.deals.filter(d => d.id !== id);
+  renderAll();
+}
+
+// ---------- Security Helpers ----------
+function escapeHtml(s) {
+  return String(s)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
+}
+
+// ---------- Init ----------
+(function init(){
+  load();
+
+  // Load settings UI
+  document.getElementById("sellingDays").value = state.settings.sellingDays || "";
+  document.getElementById("savings").value = state.settings.savings || "";
+  document.getElementById("override").value = state.settings.override || "";
+
+  // Enter key helpers
+  document.getElementById("billAmount").addEventListener("keydown", (e)=>{
+    if (e.key === "Enter") addBill();
+  });
+  document.getElementById("dealAmount").addEventListener("keydown", (e)=>{
+    if (e.key === "Enter") addDeal();
+  });
+
+  renderAll();
+})();
+</script>
+
+</body>
+</html>
